@@ -12,7 +12,10 @@ const { Parser } = require('json2csv');
 const app = express();
 try {
   app.use(cors({
-    origin: 'http://localhost:3000',
+    origin: [
+      'http://localhost:3000',
+      'https://daakbox-frontend-production.up.railway.app'
+    ],
     credentials: true,
     methods: 'GET,POST,PUT,DELETE,OPTIONS',
     allowedHeaders: 'Content-Type,Authorization'
