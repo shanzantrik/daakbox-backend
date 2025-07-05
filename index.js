@@ -33,15 +33,25 @@ try {
 }
 
 // MySQL connection pool
-const pool = mysql.createPool({
-  host: 'localhost',
-  user: 'root',
-  password: 'Madeuta1313#',
-  database: 'daakbox_dbx',
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0
-});
+let pool;
+if (process.env.MYSQL_URL) {
+  pool = mysql.createPool({
+    uri: process.env.MYSQL_URL,
+    waitForConnections: true,
+    connectionLimit: 10,
+    queueLimit: 0
+  });
+} else {
+  pool = mysql.createPool({
+    host: 'localhost',
+    user: 'root',
+    password: 'Madeuta1313#',
+    database: 'daakbox_dbx',
+    waitForConnections: true,
+    connectionLimit: 10,
+    queueLimit: 0
+  });
+}
 
 const JWT_SECRET = process.env.JWT_SECRET || 'supersecretkey';
 const JWT_EXPIRES_IN = '1d';
