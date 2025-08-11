@@ -690,41 +690,87 @@ app.put('/franchisees/:id', authenticateJWT, authorizeRoles('admin', 'superadmin
 ]), async (req, res) => {
   try {
     const body = req.body;
+
+    // Debug logging
+    console.log('Franchisee update request body:', body);
+    console.log('Files received:', req.files);
+
     const fields = [];
     const values = [];
     const allowed = [
       'user_id', 'franchise_id', 'code', 'name', 'contact_person', 'email', 'is_active', 'aadhar_number', 'pincode_area_id', 'building_name', 'locality', 'landmark', 'state', 'district', 'city', 'concern_name', 'firm_name', 'company_logo', 'firm_address_same_as_office', 'firm_address', 'firm_state', 'firm_district', 'firm_city', 'firm_pincode', 'firm_building_name', 'firm_locality', 'firm_landmark', 'pan_number', 'gst_number', 'qualification', 'qualification_file', 'prime_mobile', 'alternate_mobile', 'bank_name', 'account_number', 'ifsc_code', 'residence_address_same_as_office', 'residence_address', 'guardian_name', 'guardian_phone', 'spouse_name', 'spouse_phone', 'anniversary_date', 'birth_date', 'address_proof_type', 'terms_accepted', 'updated_by'
     ];
+
     for (const key of allowed) {
-      if (body[key] !== undefined) {
-        fields.push(`${key} = ?`);
-        values.push(body[key]);
+      if (body[key] !== undefined && body[key] !== null && body[key] !== '') {
+        // Handle boolean-like fields properly
+        if (['is_active', 'firm_address_same_as_office', 'residence_address_same_as_office', 'terms_accepted'].includes(key)) {
+          const boolValue = body[key] === '1' || body[key] === 1 || body[key] === 'true' || body[key] === true ? 1 : 0;
+          fields.push(`${key} = ?`);
+          values.push(boolValue);
+        } else {
+          fields.push(`${key} = ?`);
+          values.push(body[key]);
+        }
+      } else if (['anniversary_date', 'birth_date'].includes(key)) {
+        // Handle date fields - allow NULL values for empty dates
+        if (body[key] === '' || body[key] === null || body[key] === undefined) {
+          fields.push(`${key} = NULL`);
+        } else if (body[key] && body[key] !== '') {
+          // Validate date format before inserting
+          try {
+            const date = new Date(body[key]);
+            if (!isNaN(date.getTime())) {
+              fields.push(`${key} = ?`);
+              values.push(body[key]);
+            } else {
+              // Invalid date, set to NULL
+              fields.push(`${key} = NULL`);
+            }
+          } catch {
+            // Error parsing date, set to NULL
+            fields.push(`${key} = NULL`);
+          }
+        }
       }
     }
+
     // File fields
-    if (req.files['pan_file']) {
+    if (req.files && req.files['pan_file']) {
       fields.push('pan_file = ?');
       values.push(`/uploads/${req.files['pan_file'][0].filename}`);
     }
-    if (req.files['gst_file']) {
+    if (req.files && req.files['gst_file']) {
       fields.push('gst_file = ?');
       values.push(`/uploads/${req.files['gst_file'][0].filename}`);
     }
-    if (req.files['photo']) {
+    if (req.files && req.files['photo']) {
       fields.push('photo = ?');
       values.push(`/uploads/${req.files['photo'][0].filename}`);
     }
-    if (req.files['cheque_file']) {
+    if (req.files && req.files['cheque_file']) {
       fields.push('cheque_file = ?');
       values.push(`/uploads/${req.files['cheque_file'][0].filename}`);
     }
-    if (req.files['address_proof_file']) {
+    if (req.files && req.files['address_proof_file']) {
       fields.push('address_proof_file = ?');
       values.push(`/uploads/${req.files['address_proof_file'][0].filename}`);
     }
-    if (!fields.length) return res.status(400).json({ message: 'No fields to update' });
+
+    if (!fields.length) {
+      return res.status(400).json({ message: 'No fields to update' });
+    }
+
+    // Debug logging for SQL query
+    console.log('SQL fields:', fields);
+    console.log('SQL values:', values);
+
     values.push(req.params.id);
-    await pool.query(`UPDATE franchisees SET ${fields.join(', ')} WHERE id = ?`, values);
+    const sqlQuery = `UPDATE franchisees SET ${fields.join(', ')} WHERE id = ?`;
+    console.log('Final SQL query:', sqlQuery);
+
+    await pool.query(sqlQuery, values);
+
     // Update service areas
     let service_areas = body.service_areas;
     if (typeof service_areas === 'string') {
@@ -736,6 +782,7 @@ app.put('/franchisees/:id', authenticateJWT, authorizeRoles('admin', 'superadmin
         await pool.query('INSERT INTO franchisee_service_areas (franchisee_id, pincode_area_id) VALUES (?, ?)', [req.params.id, areaId]);
       }
     }
+
     // Update pincodes
     let pincodes = body.pincodes;
     if (typeof pincodes === 'string') {
@@ -747,8 +794,10 @@ app.put('/franchisees/:id', authenticateJWT, authorizeRoles('admin', 'superadmin
         await pool.query('INSERT INTO franchisee_pincodes (franchisee_id, pincode) VALUES (?, ?)', [req.params.id, pincode]);
       }
     }
+
     res.json(await getFranchiseeById(req.params.id));
   } catch (err) {
+    console.error('Error updating franchisee:', err);
     res.status(500).json({ message: 'Error updating franchisee', error: err.message });
   }
 });
@@ -1181,6 +1230,8 @@ function courierBookingSafeFields(row) {
     total_amount: row.total_amount,
     payment_status: row.payment_status,
     status: row.status,
+    tracking_status: row.tracking_status,
+    status_remarks: row.status_remarks,
     created_at: row.created_at,
     updated_at: row.updated_at,
     deleted_at: row.deleted_at,
@@ -1188,6 +1239,54 @@ function courierBookingSafeFields(row) {
     updated_by: row.updated_by
   };
 }
+
+// Get courier stages for tracking status dropdown
+app.get('/courier-stages', authenticateJWT, authorizeRoles('admin', 'superadmin'), async (req, res) => {
+  try {
+    // First check if courier_stages table exists, if not create it with default values
+    const [tableExists] = await pool.query(`
+      SELECT COUNT(*) as count FROM information_schema.tables
+      WHERE table_schema = DATABASE() AND table_name = 'courier_stages'
+    `);
+
+    if (tableExists[0].count === 0) {
+      // Create courier_stages table with default values
+      await pool.query(`
+        CREATE TABLE courier_stages (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          stage_name VARCHAR(100) NOT NULL UNIQUE,
+          stage_order INT DEFAULT 0,
+          is_active BOOLEAN DEFAULT TRUE,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+      `);
+
+      // Insert default stages
+      const defaultStages = [
+        'Booking Created',
+        'Pickup Scheduled',
+        'Picked Up',
+        'In Transit',
+        'Out for Delivery',
+        'Delivered',
+        'Returned',
+        'Cancelled'
+      ];
+
+      for (let i = 0; i < defaultStages.length; i++) {
+        await pool.query(
+          'INSERT INTO courier_stages (stage_name, stage_order) VALUES (?, ?)',
+          [defaultStages[i], i + 1]
+        );
+      }
+    }
+
+    const [stages] = await pool.query('SELECT * FROM courier_stages WHERE is_active = TRUE ORDER BY stage_order');
+    res.json(stages);
+  } catch (err) {
+    res.status(500).json({ message: 'Error fetching courier stages', error: err.message });
+  }
+});
 
 // List all courier bookings (admin only)
 app.get('/courier-bookings', authenticateJWT, authorizeRoles('admin', 'superadmin'), async (req, res) => {
@@ -1213,25 +1312,81 @@ app.get('/courier-bookings/:id', authenticateJWT, authorizeRoles('admin', 'super
 // Create courier booking (admin only)
 app.post('/courier-bookings', authenticateJWT, authorizeRoles('admin', 'superadmin'), upload.any(), async (req, res) => {
   try {
-    // Do not destructure req.body, access fields directly
     const body = req.body;
+    console.log('Creating courier booking with body:', body);
+
+    // Validate required fields
+    const required = [
+      'franchisee_id', 'tracking_number', 'sender_name', 'sender_phone', 'sender_address', 'sender_pincode',
+      'receiver_name', 'receiver_phone', 'receiver_address', 'receiver_pincode',
+      'service_type', 'Modes_of_Services', 'Consignment_nature', 'weight', 'length', 'width', 'height',
+      'volumetric_weight', 'declared_value', 'freight_charges', 'payment_mode', 'cod_amount', 'total_amount', 'payment_status'
+    ];
+
+    for (const field of required) {
+      if (!body[field]) {
+        return res.status(400).json({ message: `Missing required field: ${field}` });
+      }
+    }
+
+    // Set default values
+    const tracking_status = body.tracking_status || 'Booking Created';
+    const status_remarks = body.status_remarks || 'Courier booking created successfully';
+    const status = body.status || 'active';
+
+    // Get current user ID for created_by and updated_by
+    const currentUserId = req.user.id;
+
+    const insertValues = [
+      body.franchisee_id,
+      body.tracking_number,
+      body.sender_franchisee_id || body.franchisee_id,
+      body.sender_name,
+      body.sender_phone,
+      body.sender_address,
+      body.sender_pincode,
+      body.receiver_franchisee_id || null, // NULL for non-franchisee receivers
+      body.receiver_name,
+      body.receiver_phone,
+      body.receiver_address,
+      body.receiver_pincode,
+      body.service_type,
+      body.Modes_of_Services,
+      body.Consignment_nature,
+      body.weight,
+      body.length,
+      body.width,
+      body.height,
+      body.volumetric_weight,
+      body.declared_value,
+      body.freight_charges,
+      body.payment_mode,
+      body.cod_amount,
+      body.total_amount,
+      body.payment_status,
+      status,
+      tracking_status,
+      status_remarks,
+      currentUserId,
+      currentUserId
+    ];
+
+    console.log('Inserting courier booking with values:', insertValues);
+
     const [result] = await pool.query(
       `INSERT INTO courier_bookings (
         franchisee_id, tracking_number, sender_franchisee_id, sender_name, sender_phone, sender_address, sender_pincode,
         receiver_franchisee_id, receiver_name, receiver_phone, receiver_address, receiver_pincode,
         service_type, Modes_of_Services, Consignment_nature, weight, length, width, height, volumetric_weight,
-        declared_value, freight_charges, payment_mode, cod_amount, total_amount, payment_status, status, created_by, updated_by, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
-      [
-        body.franchisee_id, body.tracking_number, body.sender_franchisee_id, body.sender_name, body.sender_phone, body.sender_address, body.sender_pincode,
-        body.receiver_franchisee_id, body.receiver_name, body.receiver_phone, body.receiver_address, body.receiver_pincode,
-        body.service_type, body.Modes_of_Services, body.Consignment_nature, body.weight, body.length, body.width, body.height, body.volumetric_weight,
-        body.declared_value, body.freight_charges, body.payment_mode, body.cod_amount, body.total_amount, body.payment_status, body.status, body.created_by, body.updated_by
-      ]
+        declared_value, freight_charges, payment_mode, cod_amount, total_amount, payment_status, status, tracking_status, status_remarks, created_by, updated_by, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+      insertValues
     );
+
     const [rows] = await pool.query('SELECT * FROM courier_bookings WHERE id = ?', [result.insertId]);
     res.status(201).json(courierBookingSafeFields(rows[0]));
   } catch (err) {
+    console.error('Error creating courier booking:', err);
     res.status(500).json({ message: 'Error creating courier booking', error: err.message });
   }
 });
@@ -1239,28 +1394,45 @@ app.post('/courier-bookings', authenticateJWT, authorizeRoles('admin', 'superadm
 // Update courier booking (admin only)
 app.put('/courier-bookings/:id', authenticateJWT, authorizeRoles('admin', 'superadmin'), async (req, res) => {
   try {
+    const body = req.body;
     const allowed = [
       'franchisee_id', 'tracking_number', 'sender_franchisee_id', 'sender_name', 'sender_phone', 'sender_address', 'sender_pincode',
       'receiver_franchisee_id', 'receiver_name', 'receiver_phone', 'receiver_address', 'receiver_pincode',
       'service_type', 'Modes_of_Services', 'Consignment_nature', 'weight', 'length', 'width', 'height', 'volumetric_weight',
-      'declared_value', 'freight_charges', 'payment_mode', 'cod_amount', 'total_amount', 'payment_status', 'status', 'created_by', 'updated_by'
+      'declared_value', 'freight_charges', 'payment_mode', 'cod_amount', 'total_amount', 'payment_status', 'status', 'tracking_status', 'status_remarks'
     ];
+
     const fields = [];
     const values = [];
+
     for (const key of allowed) {
-      if (req.body[key] !== undefined) {
+      if (body[key] !== undefined && body[key] !== null && body[key] !== '') {
         fields.push(`${key} = ?`);
-        values.push(req.body[key]);
+        values.push(body[key]);
       }
     }
-    if (!fields.length) return res.status(400).json({ message: 'No fields to update' });
+
+    if (!fields.length) {
+      return res.status(400).json({ message: 'No fields to update' });
+    }
+
+    // Add updated_by and updated_at
+    fields.push('updated_by = ?');
     fields.push('updated_at = NOW()');
+    values.push(req.user.id);
     values.push(req.params.id);
-    await pool.query(`UPDATE courier_bookings SET ${fields.join(', ')} WHERE id = ?`, values);
+
+    const sqlQuery = `UPDATE courier_bookings SET ${fields.join(', ')} WHERE id = ?`;
+    console.log('Update SQL:', sqlQuery);
+    console.log('Update values:', values);
+
+    await pool.query(sqlQuery, values);
+
     const [rows] = await pool.query('SELECT * FROM courier_bookings WHERE id = ?', [req.params.id]);
     if (!rows.length) return res.status(404).json({ message: 'Courier booking not found' });
     res.json(courierBookingSafeFields(rows[0]));
   } catch (err) {
+    console.error('Error updating courier booking:', err);
     res.status(500).json({ message: 'Error updating courier booking', error: err.message });
   }
 });
@@ -1280,3 +1452,4 @@ const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log(`Backend running on port ${PORT}`);
 });
+
